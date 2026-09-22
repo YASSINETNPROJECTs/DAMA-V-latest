@@ -1,0 +1,502 @@
+// DAMA — Prisma schema (PostgreSQL) — COMPLETE FILE (Phase 7 production MVP)
+// Internal financial model: manual operator-controlled crypto deposits and
+// withdrawals. No blockchain API, no Binance, no automatic payout.
+// All amounts are INTEGER units of the given currency (no floats).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  PLAYER
+  MODERATOR
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+model User {
+  id           String     @id @default(cuid())
+  username     String     @unique
+  email        String     @unique
+  passwordHash String?
+  country      String?
+  image        String?
+  bio          String     @default("")
+  level        Int        @default(1)
+  rating       Int        @default(1000)
+  xp           Int        @default(0)
+  role         Role       @default(PLAYER)
+  status       UserStatus @default(ACTIVE)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  profile         Profile?
+  sessions        Session[]
+  googleAccount   GoogleAccount?
+  stats           PlayerStats?
+  ratingState     RatingState?
+  auditLogs       AuditLog[]
+  matches         MatchPlayer[]
+  wallets         Wallet[]
+  ledgerEntries   LedgerEntry[]
+  deposits        DepositRequest[]
+  withdrawals     WithdrawalRequest[]
+  verification    KYCVerification?
+  paymentOrders    PaymentOrder[]
+
+  @@map("users")
+}
+
+model GoogleAccount {
+  id                String   @id @default(cuid())
+  userId            String   @unique
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  providerAccountId String   @unique
+  email             String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([email])
+  @@map("google_accounts")
+}
+
+model Profile {
+  id             String  @id @default(cuid())
+  userId         String  @unique
+  user           User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  displayName    String?
+  favoriteOpen   String?
+  tagline        String  @default("")
+  showOnLeaderboard Boolean @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@map("profiles")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model PlayerStats {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wins          Int      @default(0)
+  losses        Int      @default(0)
+  draws         Int      @default(0)
+  matchesPlayed Int      @default(0)
+  winStreak     Int      @default(0)
+  bestStreak    Int      @default(0)
+  updatedAt     DateTime @updatedAt
+
+  @@map("player_stats")
+}
+
+model RatingState {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  currentRating Int      @default(1000)
+  peakRating    Int      @default(1000)
+  gamesRated    Int      @default(0)
+  lastChange    Int      @default(0)
+  updatedAt     DateTime @updatedAt
+
+  @@map("rating_states")
+}
+
+model FeatureFlag {
+  id          String  @id @default(cuid())
+  key         String  @unique
+  enabled     Boolean @default(false)
+  description String  @default("")
+  updatedAt   DateTime @updatedAt
+
+  @@map("feature_flags")
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@map("audit_logs")
+}
+
+// ====================================================================
+// FINANCIAL CORE (manual operator-controlled crypto)
+// ====================================================================
+
+// One wallet per (user, currency). balance = total; reserved = escrowed. 
+model Wallet {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  currency  String // e.g. "USDT"
+  balance   Int      @default(0) // total balance (integer units)
+  reserved  Int      @default(0) // escrowed / locked
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  entries LedgerEntry[]
+
+  @@unique([userId, currency])
+  @@index([userId])
+  @@map("wallets")
+}
+
+enum LedgerType {
+  DEPOSIT_CREDIT
+  WITHDRAWAL_RESERVE
+  WITHDRAWAL_RELEASE
+  WITHDRAWAL_COMPLETED
+  MATCH_STAKE_RESERVE
+  MATCH_STAKE_RELEASE
+  MATCH_WIN
+  MATCH_LOSS
+  PLATFORM_FEE
+  REFUND
+  ADJUSTMENT
+}
+
+// Append-only ledger. Every balance-changing op leaves exactly one entry. 
+model LedgerEntry {
+  id            String     @id @default(cuid())
+  userId        String
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  walletId      String?
+  wallet        Wallet?    @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  currency      String
+  type          LedgerType
+  amount        Int // operation amount (integer units)
+  balanceAfter  Int // wallet total after the op
+  reservedAfter Int // wallet reserved after the op
+  reference     String? // deposit/withdrawal/match id
+  metadata      Json?
+  createdAt     DateTime   @default(now())
+
+  @@index([userId])
+  @@index([walletId])
+  @@index([reference])
+  @@index([type])
+  @@map("ledger_entries")
+}
+
+
+enum DepositStatus {
+  PENDING // submitted by user — NOT credited yet
+  APPROVED // admin approved — credited exactly once
+  REJECTED
+  CANCELLED
+}
+
+model DepositRequest {
+  id            String        @id @default(cuid())
+  userId        String
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  currency      String
+  network       String
+  amount        Int
+  txId          String?       @unique // optional for provider payments; unique when present
+  provider      String        @default("MANUAL_CRYPTO")
+  providerReference String?
+  status        DepositStatus @default(PENDING)
+  adminId       String? // admin who reviewed
+  rejectionReason String?
+  reviewedAt    DateTime?
+  createdAt     DateTime      @default(now())
+
+  @@index([userId])
+  @@index([status])
+  @@index([currency, network])
+  paymentOrder   PaymentOrder?
+
+  @@map("deposit_requests")
+}
+
+enum WithdrawalStatus {
+  PENDING // requested — funds reserved
+  PROCESSING // admin marked as being handled
+  COMPLETED // admin entered TXID — funds left the platform
+  REJECTED // released back
+  CANCELLED // user cancelled — released back
+}
+
+model WithdrawalRequest {
+  id                String           @id @default(cuid())
+  userId            String
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  currency          String
+  network           String
+  amount            Int
+  destinationType   String        @default("BLOCKCHAIN_ADDRESS")
+  destinationValue  String
+  status            WithdrawalStatus @default(PENDING)
+  txId              String? // filled by admin on completion
+  adminId           String?
+  rejectionReason   String?
+  processedAt       DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime         @default(now())
+
+  @@index([userId])
+  @@index([status])
+  @@index([currency, network])
+  @@map("withdrawal_requests")
+}
+
+// Admin-configured currency/network rails. Deposit addresses live ONLY here. 
+model WalletNetwork {
+  id              String   @id @default(cuid())
+  currency        String // e.g. "USDT"
+  network         String // e.g. "TRC20"
+  displayName     String   @default("")
+  depositAddress  String // operator's deposit address for this rail
+  minDeposit      Int      @default(1)
+  minWithdrawal   Int      @default(1)
+  enabled         Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([currency, network])
+  @@map("wallet_networks")
+}
+
+// Platform revenue (match fees) — tracked separately from player funds. 
+model PlatformRevenue {
+  id        String   @id @default(cuid())
+  amount    Int
+  currency  String   @default("USDT")
+  source    String // "match_fee"
+  matchId   String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([matchId])
+  @@map("platform_revenue")
+}
+
+enum KycStatus {
+  NOT_STARTED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+// Simulated KYC — NOT real identity verification (provider adapter is a stub). 
+model KYCVerification {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status    KycStatus @default(NOT_STARTED)
+  provider  String   @default("SimulatedKYCProvider")
+  level     Int      @default(1)
+  metadata  Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("kyc_verifications")
+}
+
+// Admin-editable platform settings (fee %, matchmaking, registration, currency). 
+model AppSetting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@map("app_settings")
+}
+
+// ====================================================================
+// GAME (Phases 2-4 — unchanged)
+// ====================================================================
+
+enum MatchStatus {
+  ACTIVE
+  FINISHED
+  DRAW
+  ABANDONED
+}
+
+model Match {
+  id        String      @id @default(cuid())
+  mode      String      @default("TEST") // TEST | DEMO | RATED
+  status    MatchStatus @default(ACTIVE)
+  stake     Int         @default(0)
+  currency  String      @default("USDT")
+  settledAt DateTime?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  players MatchPlayer[]
+  state   GameState?
+  moves   Move[]
+
+  @@map("matches")
+}
+
+model MatchPlayer {
+  id       String  @id @default(cuid())
+  matchId  String
+  match    Match   @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  userId   String?
+  user     User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  seat     Int
+  color    String
+  isEngine Boolean @default(false)
+
+  @@unique([matchId, seat])
+  @@index([userId])
+  @@map("match_players")
+}
+
+model GameState {
+  id         String   @id @default(cuid())
+  matchId    String   @unique
+  match      Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  board      Int[]
+  turn       String
+  status     String
+  winnerSeat Int?
+  endReason  String?
+  quietPlies Int      @default(0)
+  moveNumber Int      @default(1)
+
+  whiteMs       Int      @default(300000)
+  blackMs       Int      @default(300000)
+  clockUpdatedAt DateTime @default(now())
+
+  updatedAt DateTime @updatedAt
+
+  @@map("game_states")
+}
+
+model Move {
+  id         String   @id @default(cuid())
+  matchId    String
+  match      Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  moveNumber Int
+  seat       Int
+  from       Int
+  path       Int[]
+  captured   Int[]
+  notation   String
+  isPartial  Boolean @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([matchId, moveNumber])
+  @@map("moves")
+}
+
+
+// ====================================================================
+// PAYMENT ORCHESTRATION — provider-agnostic, idempotent payment layer
+// ====================================================================
+
+enum PaymentOrderStatus {
+  CREATED
+  PENDING
+  PAID
+  FAILED
+  CANCELED
+  EXPIRED
+  REFUNDED
+}
+
+enum PaymentMethodType {
+  BINANCE_PAY
+  CRYPTO_MANUAL
+}
+
+model PaymentMethod {
+  id          String            @id @default(cuid())
+  code        String            @unique
+  type        PaymentMethodType
+  currency    String
+  network     String?
+  displayName String
+  enabled     Boolean           @default(false)
+  config      Json?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  orders PaymentOrder[]
+
+  @@index([currency, enabled])
+  @@map("payment_methods")
+}
+
+model PaymentOrder {
+  id                String             @id @default(cuid())
+  userId            String
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  paymentMethodId   String
+  paymentMethod     PaymentMethod      @relation(fields: [paymentMethodId], references: [id], onDelete: Restrict)
+  depositRequestId  String?            @unique
+  depositRequest    DepositRequest?    @relation(fields: [depositRequestId], references: [id], onDelete: SetNull)
+  provider          String
+  merchantTradeNo   String             @unique
+  providerOrderId   String?            @unique
+  providerReference String?
+  currency          String
+  amount            Decimal            @db.Decimal(36, 8)
+  status            PaymentOrderStatus  @default(CREATED)
+  checkoutUrl       String?
+  qrContent         String?
+  qrCodeLink        String?
+  deeplink          String?
+  universalUrl      String?
+  expiresAt         DateTime?
+  paidAt            DateTime?
+  lastProviderStatus String?
+  idempotencyKey    String             @unique
+  metadata          Json?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([provider, status])
+  @@index([providerReference])
+  @@map("payment_orders")
+}
+
+model PaymentWebhookEvent {
+  id          String    @id @default(cuid())
+  provider    String
+  eventKey    String    @unique
+  eventType   String?
+  signature   String?
+  payload     Json
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+  success     Boolean   @default(false)
+  error       String?
+
+  @@index([provider, receivedAt])
+  @@map("payment_webhook_events")
+}
