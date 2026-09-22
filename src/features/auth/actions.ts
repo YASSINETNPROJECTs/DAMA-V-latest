@@ -77,7 +77,7 @@ export async function loginAction(
   const user = await prisma.user.findUnique({ where: { email } });
 
   // Same error for unknown email / wrong password (no account enumeration).
-  if (!user || !(await verifyPassword(parsed.data.password, user.passwordHash))) {
+  if (!user || !user.passwordHash || !(await verifyPassword(parsed.data.password, user.passwordHash))) {
     return { error: "Invalid email or password" };
   }
   if (user.status !== "ACTIVE") {
