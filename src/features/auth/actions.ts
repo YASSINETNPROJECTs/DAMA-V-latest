@@ -1,6 +1,7 @@
 "use server";
 
 import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
 import { prisma } from "@/lib/prisma";
 import { appConfig } from "@/config/app";
 import { hashPassword, verifyPassword } from "./password";
