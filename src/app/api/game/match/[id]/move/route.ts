@@ -10,15 +10,12 @@ const bodySchema = z.object({
   to: z.number().int().min(0).max(63),
 });
 
-// POST /api/game/match/[id]/move — submit ONE hop { from, to }.
-// Server validates, stores, broadcasts. Multi-jump: keep sending hops from
-// the forced square until the server frees the turn.
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  // باقي الكود كما هو...
+  const user = await getCurrentUser();
 
   if (!user) return NextResponse.json({ error: "Sign in required" }, { status: 401 });
 
@@ -37,7 +34,7 @@ export async function POST(
   }
 
   try {
-    const view = await submitRoomMove(params.id, user.id, parsed.data.from, parsed.data.to);
+    const view = await submitRoomMove(id, user.id, parsed.data.from, parsed.data.to);
     return NextResponse.json(view);
   } catch (e) {
     if (e instanceof RoomError) {
