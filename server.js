@@ -8,7 +8,7 @@ const next = require("next");
 const { Server } = require("socket.io");
 
 const dev = process.env.NODE_ENV !== "production";
-const hostname = process.env.HOSTNAME || "0.0.0.0";
+const hostname = "0.0.0.0";
 const port = parseInt(process.env.PORT, 10) || 10000;
 
 // إعداد Next.js بدون تمرير hostname و port مباشرة لمنع تعارض المسارات
